@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ágora - Ciplex para Internação
 // @namespace    https://ciplexsistemas.com/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Envia o paciente aberto no Ciplex para a ficha local de tratamento hospitalar.
 // @author       Gabriel Coelho
 // @match        https://ciplexsistemas.com/sistema/exibir*
@@ -92,12 +92,14 @@
 
   function extractPatient(animalRoot) {
     const ciplexAnimalId = value(animalRoot, "AnimalIdAnimal");
+    const ciplexClientId = location.hash.match(/^#clientes\/exibir\/(\d+)/)?.[1] || "";
     const tutorArea = clientScope(animalRoot);
     const age = value(animalRoot, "AnimalIdade")
       || calculateAge(value(animalRoot, "AnimalDtNascimento"));
     const neuteredValue = value(animalRoot, "AnimalCastrado");
 
     return {
+      ciplexClientId,
       ciplexAnimalId,
       recordNumber: ciplexAnimalId,
       weight: latestWeight(animalRoot, ciplexAnimalId),
