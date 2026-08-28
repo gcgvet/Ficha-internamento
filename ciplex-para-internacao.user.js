@@ -1,24 +1,34 @@
 // ==UserScript==
 // @name         Ágora - Ciplex para Internação
-// @namespace    https://ciplexsistemas.com/
-// @version      1.0.1
-// @description  Envia o paciente aberto no Ciplex para a ficha local de tratamento hospitalar.
-// @author       Gabriel Coelho
-// @match        https://ciplexsistemas.com/sistema/exibir*
+// @namespace    https://agoraveterinaria.com.br/
+// @version      1.1.0
+// @description  Abre ou cria a ficha de internação a partir do paciente aberto no Ciplex.
+// @author       Ágora Clínica Veterinária
+// @match        https://ciplexsistemas.com/sistema/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @grant        GM_openInTab
-// @connect      127.0.0.1
-// @updateURL    https://raw.githubusercontent.com/gcgvet/Ficha-internamento/main/ciplex-para-internacao.user.js
-// @downloadURL  https://raw.githubusercontent.com/gcgvet/Ficha-internamento/main/ciplex-para-internacao.user.js
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @connect      script.google.com
+// @connect      script.googleusercontent.com
+// @updateURL    https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-ciplex-para-internacao.user.js
+// @downloadURL  https://raw.githubusercontent.com/gcgvet/agora-hv-coordenacao-tampermonkey/main/agora-ciplex-para-internacao.user.js
 // ==/UserScript==
 
 (function () {
   "use strict";
 
-  const API_URL = "http://127.0.0.1:8765/api/integracoes/ciplex";
+  const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyYjJIoUHUspHeZCUoZb_tnupYF6_cI3qeQGxSGAtjR7F5EaHmbGpIiezPwbzzqR-jcow/exec";
+  const SITE_URL_KEY = "agora-hospital-site-url";
   const BUTTON_CLASS = "agora-enviar-internacao";
+  const inFlightAnimalIds = new Set();
   let injectionTimer;
+
+  if (typeof GM_registerMenuCommand === "function") {
+    GM_registerMenuCommand("Configurar caminho da ficha de internação", configureSiteUrl);
+  }
 
   function scopedElement(scope, id) {
     const matches = [...scope.querySelectorAll(`[id="${id}"]`)];
@@ -92,14 +102,12 @@
 
   function extractPatient(animalRoot) {
     const ciplexAnimalId = value(animalRoot, "AnimalIdAnimal");
-    const ciplexClientId = location.hash.match(/^#clientes\/exibir\/(\d+)/)?.[1] || "";
     const tutorArea = clientScope(animalRoot);
     const age = value(animalRoot, "AnimalIdade")
       || calculateAge(value(animalRoot, "AnimalDtNascimento"));
     const neuteredValue = value(animalRoot, "AnimalCastrado");
 
     return {
-      ciplexClientId,
       ciplexAnimalId,
       recordNumber: ciplexAnimalId,
       weight: latestWeight(animalRoot, ciplexAnimalId),
@@ -118,65 +126,124 @@
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
         method: "POST",
-        url: API_URL,
-        headers: { "Content-Type": "application/json" },
-        data: JSON.stringify(patient),
-        timeout: 6000,
+        url: WEB_APP_URL,
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        data: JSON.stringify({ action: "importInternacaoCiplex", internacao: patient }),
+        timeout: 60000,
         onload(response) {
           let result;
           try {
             result = JSON.parse(response.responseText);
           } catch {
-            reject(new Error("A aplicação local retornou uma resposta inválida."));
+            reject(new Error("O Apps Script retornou uma resposta inválida."));
             return;
           }
-          if (response.status < 200 || response.status >= 300) {
-            reject(new Error(result.erro || "Não foi possível enviar o paciente."));
+          if (response.status < 200 || response.status >= 300 || !result.ok) {
+            reject(new Error(result.error || "Não foi possível enviar o paciente."));
+            return;
+          }
+          if (typeof result.created !== "boolean" || !result.internacao?.id) {
+            reject(new Error("O Apps Script retornou uma internação inválida."));
             return;
           }
           resolve(result);
         },
         ontimeout() {
-          reject(new Error("A aplicação local não respondeu a tempo."));
+          reject(new Error("O Apps Script não respondeu a tempo."));
         },
         onerror() {
-          const error = new Error("A aplicação local não está aberta.");
-          error.localAppUnavailable = true;
-          reject(error);
+          reject(new Error("Não foi possível acessar o Apps Script."));
         }
       });
     });
   }
 
-  function openLocalRecord(url) {
+  function normalizeSiteUrl(input) {
+    let text = String(input || "").trim().replace(/^["']|["']$/g, "");
+    if (/^[a-z]:[\\/]/i.test(text)) text = `file:///${text.replace(/\\/g, "/")}`;
+    else if (/^\\\\[^\\]+\\[^\\]+/.test(text)) text = `file:${text.replace(/\\/g, "/")}`;
+    let url;
+    try {
+      url = new URL(text);
+    } catch {
+      throw new Error("Informe o caminho completo até site\\index.html.");
+    }
+    if (url.protocol !== "file:") throw new Error("A ficha deve ser aberta por uma URL file:///.");
+    let pathname;
+    try {
+      pathname = decodeURIComponent(url.pathname);
+    } catch {
+      pathname = url.pathname;
+    }
+    if (!/\/site\/index\.html$/i.test(pathname.replace(/\\/g, "/"))) {
+      throw new Error("O caminho deve terminar em site\\index.html.");
+    }
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  }
+
+  function configureSiteUrl() {
+    const current = GM_getValue(SITE_URL_KEY, "");
+    const input = window.prompt(
+      "Informe o caminho completo da ficha nesta estação.\nExemplo: J:\\Meu Drive\\Tratamento Hospitalar\\site\\index.html",
+      current
+    );
+    if (input === null) return "";
+    try {
+      const normalized = normalizeSiteUrl(input);
+      GM_setValue(SITE_URL_KEY, normalized);
+      window.alert("Caminho da ficha configurado nesta estação.");
+      return normalized;
+    } catch (error) {
+      window.alert(error.message);
+      return "";
+    }
+  }
+
+  function configuredSiteUrl() {
+    const saved = GM_getValue(SITE_URL_KEY, "");
+    if (!saved) return configureSiteUrl();
+    try {
+      return normalizeSiteUrl(saved);
+    } catch {
+      GM_setValue(SITE_URL_KEY, "");
+      return configureSiteUrl();
+    }
+  }
+
+  function openRecord(siteUrl, patientId) {
+    const url = new URL(siteUrl);
+    url.searchParams.set("paciente", patientId);
     if (typeof GM_openInTab === "function") {
-      GM_openInTab(url, { active: true, insert: true, setParent: true });
+      GM_openInTab(url.href, { active: true, setParent: true });
     } else {
-      window.open(url, "_blank", "noopener");
+      window.open(url.href, "_blank", "noopener");
     }
   }
 
   async function handleImport(button, animalRoot) {
     const originalText = button.textContent;
     const patient = extractPatient(animalRoot);
-    if (!patient.ciplexAnimalId || !patient.name) {
-      window.alert("Não foi possível identificar o ID e o nome do animal aberto no Ciplex.");
+    if (!patient.ciplexAnimalId) {
+      window.alert("Não foi possível identificar o ID do animal aberto no Ciplex.");
       return;
     }
+    if (inFlightAnimalIds.has(patient.ciplexAnimalId)) return;
+    const siteUrl = configuredSiteUrl();
+    if (!siteUrl) return;
 
+    inFlightAnimalIds.add(patient.ciplexAnimalId);
     button.disabled = true;
     button.textContent = "Enviando...";
     try {
       const result = await sendPatient(patient);
       button.textContent = result.created ? "Ficha criada" : "Abrindo ficha";
-      openLocalRecord(result.url);
+      openRecord(siteUrl, result.internacao.id);
     } catch (error) {
-      if (error.localAppUnavailable) {
-        window.alert("Abra o atalho 'Tratamento Hospitalar' na Área de Trabalho e clique novamente em 'Enviar para internação'.");
-      } else {
-        window.alert(error.message);
-      }
+      window.alert(error.message);
     } finally {
+      inFlightAnimalIds.delete(patient.ciplexAnimalId);
       window.setTimeout(() => {
         button.disabled = false;
         button.textContent = originalText;
